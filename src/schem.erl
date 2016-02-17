@@ -1,10 +1,7 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%% @doc Scheme interpreter
-%%% @end
-%%% @author Markus Ekholm <markus@botten.org>
-%%% @copyright 2016 (c) Markus Ekholm <markus@botten.org>
-%%% @license Copyright (c) 2016, Markus Ekholm
+%%% Copyright 2016 (c) Markus Ekholm <markus@botten.org>
 %%% All rights reserved.
+%%%
 %%% Redistribution and use in source and binary forms, with or without
 %%% modification, are permitted provided that the following conditions are met:
 %%%    * Redistributions of source code must retain the above copyright
@@ -27,7 +24,10 @@
 %%% (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 %%% THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 %%%
+%%% @doc Scheme interpreter
 %%% @end
+%%% @author Markus Ekholm <markus@botten.org>
+%%% @copyright 2016 (c) Markus Ekholm <markus@botten.org>
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%=============================================================================
@@ -86,6 +86,7 @@
 %% @doc
 %% Run interpreter until eof is given (Ctrl-d).
 %% @end
+-spec main(any()) -> ok.
 main(_) ->
   io:format("schem intepreter~n", []),
   Env = default_env(),
@@ -105,6 +106,13 @@ eval_string(S) ->
   {R, _NextId, _Envs} = eval_string(S, Env#env.id, Env#env.id + 1, Envs),
   R.
 
+
+%%=============================================================================
+%% Internal functions
+
+%%-----------------------------------------------------------------------------
+%% Interpreter functions
+
 -spec interpreter(env_id(), env_id(), envs()) -> ok.
 interpreter(EnvId, NextEnvId0, Envs0) ->
   try
@@ -122,14 +130,16 @@ interpreter(EnvId, NextEnvId0, Envs0) ->
       interpreter(EnvId, NextEnvId0, Envs0)
   end.
 
-%%=============================================================================
-%% Internal functions
 
 %%-----------------------------------------------------------------------------
 %% Evaluation functions
 
 -spec eval_string(string(), env_id(), env_id(), envs()) ->
                      {any(), env_id(), envs()}.
+%% @private
+%% Evaluate Schem expression string in the environment denoted by the
+%% environment id.
+%% @end
 eval_string(S, EnvId, NextId, Envs) ->
   eval(parse_string(S), EnvId, NextId, Envs).
 
@@ -184,8 +194,10 @@ eval([X0 | Xs], EnvId, NextId0, Envs0) ->
   Args = lists:reverse(Args0),
   call_procedure(Proc, Args, NextId, Envs).
 
+%% Primitive procedures
 call_procedure(F, Args, NextId, Envs) when is_function(F) ->
   F(Args, NextId, Envs);
+%% Schem procedures
 call_procedure({procedure, Params, Body, EnvId}, Args, NextId0, Envs0) ->
   NextId = NextId0 + 1,
   Inner = maps:from_list(lists:zip(Params, Args)),
@@ -207,13 +219,14 @@ env_update({symbol, K}, V, EnvId, Envs) ->
     false -> env_update({symbol, K}, V, OuterId, Envs)
   end.
 
-env_get({symbol,K}, EnvId, Envs) ->
+env_get({symbol, K}, EnvId, Envs) ->
   #env{inner=Inner, outer=OuterId} = maps:get(EnvId, Envs),
   case maps:is_key(K, Inner) of
     true  -> maps:get(K, Inner);
     false -> env_get({symbol, K}, OuterId, Envs)
   end.
 
+-spec default_env() -> env().
 default_env() ->
   #env{ id = 0
       , inner =
@@ -259,12 +272,12 @@ primitive_procedure(F) ->
 %%-----------------------------------------------------------------------------
 %% Parser functions
 
-%% @doc
+%% @private
 %% Parse using LL(1) grammar:
-%% <exp> ::= <sexp>
-%% <sexp> ::= <atom> | '(' <list> ')'
-%% <list> ::= <sexp> <list>
-%% <atom> ::= <symbol> | <number>
+%% exp ::= sexp
+%% sexp ::= atom | open_paren list end_paren
+%% list ::= sexp list
+%% atom ::= symbol | number
 %% @end
 -spec parse_string(string()) -> ast().
 parse_string(S) ->
@@ -310,6 +323,7 @@ pp({number, X}) ->
 tokenize(S) ->
   tokenize(S, "", [], false).
 
+-spec tokenize(string(), string(), [token()], boolean()) -> [token()].
 %% basecase 1, no token no nothing, assert not inside a string
 tokenize("", "", Acc, false) ->
   lists:reverse(Acc);
@@ -338,6 +352,7 @@ tokenize([C | S], [_|_] = Token, Acc, false = InsideStr) when ?IS_PAREN(C) ->
 tokenize([C | S], Token, Acc, InsideStr) ->
   tokenize(S, [C | Token], Acc, InsideStr).
 
+-spec finalize_token(string()) -> token().
 finalize_token(Token0) ->
   convert_token(lists:reverse(Token0)).
 
@@ -362,6 +377,9 @@ convert_token(Token0) ->
                                      lists:map(Fun, Converters)),
   Token.
 
+%% @private
+%% Accept strings enclosed with " as string tokens.
+%% @end
 list_to_tagged_string([$" | S]) ->
   list_to_tagged_string(S, "").
 
@@ -380,7 +398,7 @@ list_to_tagged_string([C | S], Acc) ->
 %%-----------------------------------------------------------------------------
 %% Unit tests
 
-%% @doc
+%% @private
 %% Most examples taken from Norvigs Lispy article.
 %% @end
 eval_string_test_() ->

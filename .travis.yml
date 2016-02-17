@@ -2,4 +2,4 @@ language: erlang
 sudo: false
 otp_release:
   - 18.0
-script: "make check && make escript"
+script: "make check && make edoc && make escript"

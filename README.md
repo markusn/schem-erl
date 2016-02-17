@@ -24,7 +24,8 @@ make check
 ## Features
 
 - Lexical scoping
-- Closures (mutable)
+- Closures (with mutable environment)
+- Naive garbage collection of no longer referenced closure environments
 - Implemented primitives
   - begin
   - quote
@@ -47,8 +48,6 @@ make check
 
 - Anything missing in `Features`
 - Error handling
-- Garbage collection (non-primitive procedure calls allocates an environment
-  that is never reclaimed).
 
 
 ## Author

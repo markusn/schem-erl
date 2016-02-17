@@ -49,7 +49,7 @@
 
 -record(env, { id :: env_id()
              , inner = maps:new() :: #{string() => any()}
-             , outer = undefined :: env_id()
+             , outer = undefined :: maybe_env_id()
              }).
 
 
@@ -57,19 +57,20 @@
 %% Types
 
 -type env() :: #env{}.
--type env_id() :: non_neg_integer() | undefined.
+-type env_id() :: non_neg_integer().
+-type maybe_env_id() :: env_id() | undefined.
 -type envs() :: #{env_id() => env()}.
 
 -type ast() :: [symbol_token() | string_token() | number_token() | ast()].
 -type token() :: symbol_token()
                | string_token()
                | number_token()
-               | open_paren
-               | close_paren.
+               | paren_token().
 
--type symbol_token() :: {string, string()}.
+-type symbol_token() :: {symbol, string()}.
 -type string_token() :: {string, string()}.
 -type number_token() :: {number, integer() | float()}.
+-type paren_token() :: open_paren | close_paren.
 
 %%=============================================================================
 %% Defines
@@ -121,8 +122,9 @@ interpreter(EnvId, NextEnvId0, Envs0) ->
       eof -> io:format("#<EOF>~n", []);
       _   ->
         S = string:strip(string:strip(S0, both, 13), both, 10),
-        {Res, NextEnvId, Envs} = eval_string(S, EnvId, NextEnvId0, Envs0),
+        {Res, NextEnvId, Envs1} = eval_string(S, EnvId, NextEnvId0, Envs0),
         io:format("~s~n", [pp(Res)]),
+        Envs = gc(EnvId, Envs1),
         interpreter(EnvId, NextEnvId, Envs)
     end
   catch error:Error ->
@@ -212,6 +214,7 @@ to_t(false) -> {number, 0}.
 %%-----------------------------------------------------------------------------
 %% Evaluation environment functions
 
+-spec env_update(symbol_token(), any(), env_id(), envs()) -> envs().
 env_update({symbol, K}, V, EnvId, Envs) ->
   #env{inner=Inner, outer=OuterId} = Env = maps:get(EnvId, Envs),
   case maps:is_key(K, Inner) of
@@ -219,12 +222,67 @@ env_update({symbol, K}, V, EnvId, Envs) ->
     false -> env_update({symbol, K}, V, OuterId, Envs)
   end.
 
+-spec env_get(symbol_token(), env_id(), envs()) -> any().
 env_get({symbol, K}, EnvId, Envs) ->
   #env{inner=Inner, outer=OuterId} = maps:get(EnvId, Envs),
   case maps:is_key(K, Inner) of
     true  -> maps:get(K, Inner);
     false -> env_get({symbol, K}, OuterId, Envs)
   end.
+
+%% @private
+%% Recursively remove envs that are not referenced until a fix-point is reached.
+%% @end
+-spec gc(env_id(), envs()) -> envs().
+gc(EnvId, Envs0) ->
+  Referenced = sets:add_element(EnvId, get_referenced_transitive(EnvId, Envs0)),
+  Envs = maps:filter(fun(K, _) -> sets:is_element(K, Referenced) end, Envs0),
+  case Envs =:= Envs0 of
+    true  -> Envs;
+    false -> gc(EnvId, Envs)
+  end.
+
+-spec get_referenced_transitive(env_id(), envs()) -> sets:set(env_id()).
+get_referenced_transitive(EnvId, Envs) ->
+  {Referenced, _} = get_referenced_transitive(EnvId, Envs, sets:new()),
+  Referenced.
+
+-spec get_referenced_transitive(env_id(), envs(), sets:set(env_id())) ->
+                                   {sets:set(env_id()), sets:set(env_id())}.
+get_referenced_transitive(EnvId, Envs, Processed0) ->
+  case sets:is_element(EnvId, Processed0) of
+    true ->
+      {sets:new(), Processed0};
+    false ->
+      Env = maps:get(EnvId, Envs),
+      Processed = sets:add_element(EnvId, Processed0),
+      Refs = get_referenced_non_transitive(Env),
+      Fun = fun(RefId, {AccRefs0, AccProcessed0}) ->
+                {NewRefs, AccProcessed} =
+                  get_referenced_transitive(RefId, Envs, AccProcessed0),
+                AccRefs = sets:union(AccRefs0, NewRefs),
+                {AccRefs, AccProcessed}
+            end,
+      sets:fold(Fun, {Refs, Processed}, Refs)
+  end.
+
+-spec get_referenced_non_transitive(env()) -> sets:set(env_id()).
+get_referenced_non_transitive(Env) ->
+  Refs0 = sets:new(),
+  #env{inner = Inner, outer = Outer} = Env,
+  Refs = case Outer of
+           undefined ->
+             Refs0;
+           _         ->
+             sets:add_element(Outer, Refs0)
+         end,
+  maps:fold(fun(_, {procedure, _, _, ProcEnvId}, AccRefs) ->
+                sets:add_element(ProcEnvId, AccRefs);
+               (_, _, AccRefs) ->
+                AccRefs
+            end,
+            Refs,
+            Inner).
 
 -spec default_env() -> env().
 default_env() ->
@@ -356,6 +414,7 @@ tokenize([C | S], Token, Acc, InsideStr) ->
 finalize_token(Token0) ->
   convert_token(lists:reverse(Token0)).
 
+-spec paren_to_token(char()) -> paren_token().
 paren_to_token($() -> open_paren;
 paren_to_token($)) -> close_paren.
 
@@ -380,9 +439,11 @@ convert_token(Token0) ->
 %% @private
 %% Accept strings enclosed with " as string tokens.
 %% @end
+-spec list_to_tagged_string(string()) -> string_token().
 list_to_tagged_string([$" | S]) ->
   list_to_tagged_string(S, "").
 
+-spec list_to_tagged_string(string(), string()) -> string_token().
 list_to_tagged_string([$"], Acc) ->
   {string, lists:reverse(Acc)};
 list_to_tagged_string([C | S], Acc) ->
@@ -510,6 +571,56 @@ eval_string_test_() ->
          "(account1 -20.00))"))
   ].
 
+gc_test_() ->
+  [ ?_assertEqual([0, 1, 2, 3],
+                  maps:keys(
+                    gc(
+                      0,
+                      #{ 0 =>
+                           #env{inner = #{"x" => {procedure, ["x"], [], 3}}}
+                       , 3 => #env{outer = 2}
+                       , 2 => #env{ outer = 0
+                                  , inner = #{"y" => {procedure, ["x"], [], 1}}
+                                  }
+                       , 1 => #env{outer = 0}
+                       , 10 => #env{outer = 0}
+                       })))
+  ].
+
+get_referenced_transitive_test_() ->
+  [ ?_assertEqual([],
+                 sets:to_list(
+                   get_referenced_transitive(0, #{0 => default_env()})))
+  , ?_assertEqual([0, 1, 2, 3],
+                 lists:usort(
+                   sets:to_list(
+                     get_referenced_transitive(
+                       0,
+                       #{ 0 =>
+                            #env{inner = #{"x" => {procedure, ["x"], [], 3}}}
+                        , 3 => #env{outer = 2}
+                        , 2 => #env{ outer = 0
+                                   , inner = #{"y" => {procedure, ["x"], [], 1}}
+                                   }
+                        , 1 => #env{outer = 0}
+                        , 10 => #env{outer = 0}
+                        }))))
+  ].
+
+get_referenced_non_transitive_test() ->
+  [ ?_assertEqual([],
+                  sets:to_list(get_referenced_non_transitive(#env{})))
+  ,  ?_assertEqual([1],
+                  sets:to_list(get_referenced_non_transitive(#env{outer = 1})))
+  ,  ?_assertEqual([1],
+                  sets:to_list(
+                    get_referenced_non_transitive(
+                      #env{inner = #{ "x" => {procedure, ["x"], [], 2}
+                                    , "y" => fun() -> ok end
+                                    }
+                          })))
+  ].
+
 parse_string_test_() ->
   [ ?_assertEqual(
        [ {symbol, "+"}
@@ -544,6 +655,28 @@ parse_string_test_() ->
        parse_string("(begin (define x 3) (define y 1) (+ x y))"))
   ].
 
+pp_test_() ->
+  [ ?_assertEqual(
+       "(+ 1 (- 4 2))",
+       pp([ {symbol, "+"}
+              , {number, 1}
+              , [ {symbol, "-"}
+                , {number, 4}
+                , {number, 2}
+                ]
+              ]))
+  , ?_assertEqual(
+       "(+ 3 3)",
+       pp([{symbol, "+"}, {number, 3}, {number, 3}]))
+  , ?_assertEqual(
+       "(begin (define x 3) (define y 1) (+ x y))",
+       pp([ {symbol, "begin"}
+              , [{symbol, "define"}, {symbol, "x"}, {number, 3}]
+              , [{symbol, "define"}, {symbol, "y"}, {number, 1}]
+              , [{symbol, "+"}, {symbol, "x"}, {symbol, "y"}]
+              ]))
+  ].
+
 tokenize_test_() ->
   [ ?_assertEqual(
        [ open_paren
@@ -571,28 +704,6 @@ tokenize_test_() ->
        , close_paren
        ],
        tokenize("(print \"hello (world!))\")"))
-  ].
-
-pp_test_() ->
-  [ ?_assertEqual(
-       "(+ 1 (- 4 2))",
-       pp([ {symbol, "+"}
-              , {number, 1}
-              , [ {symbol, "-"}
-                , {number, 4}
-                , {number, 2}
-                ]
-              ]))
-  , ?_assertEqual(
-       "(+ 3 3)",
-       pp([{symbol, "+"}, {number, 3}, {number, 3}]))
-  , ?_assertEqual(
-       "(begin (define x 3) (define y 1) (+ x y))",
-       pp([ {symbol, "begin"}
-              , [{symbol, "define"}, {symbol, "x"}, {number, 3}]
-              , [{symbol, "define"}, {symbol, "y"}, {number, 1}]
-              , [{symbol, "+"}, {symbol, "x"}, {symbol, "y"}]
-              ]))
   ].
 
 -endif.

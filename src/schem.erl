@@ -104,7 +104,7 @@ main(_) ->
 eval_string(S) ->
   Env = default_env(),
   Envs = #{Env#env.id => Env},
-  {R, _NextId, _Envs} = eval_string(S, Env#env.id, Env#env.id + 1, Envs),
+  {R, _NId, _Envs, _Dirty} = eval_string(S, Env#env.id, Env#env.id + 1, Envs),
   R.
 
 
@@ -115,21 +115,25 @@ eval_string(S) ->
 %% Interpreter functions
 
 -spec interpreter(env_id(), env_id(), envs()) -> ok.
-interpreter(EnvId, NextEnvId0, Envs0) ->
+interpreter(EnvId, NextId0, Envs0) ->
   try
     S0 = io:get_line("schem> "),
     case S0 of
       eof -> io:format("#<EOF>~n", []);
       _   ->
         S = string:strip(string:strip(S0, both, 13), both, 10),
-        {Res, NextEnvId, Envs1} = eval_string(S, EnvId, NextEnvId0, Envs0),
+        {Res, NextId, Envs1, Dirty} = eval_string(S, EnvId, NextId0, Envs0),
         io:format("~s~n", [pp(Res)]),
-        Envs = gc(EnvId, Envs1),
-        interpreter(EnvId, NextEnvId, Envs)
+        %% Only GC if something dirty happened
+        Envs = case Dirty of
+                 true  -> gc(EnvId, Envs1);
+                 false -> Envs1
+               end,
+        interpreter(EnvId, NextId, Envs)
     end
   catch error:Error ->
       io:format("Error: ~p~n~n", [Error]),
-      interpreter(EnvId, NextEnvId0, Envs0)
+      interpreter(EnvId, NextId0, Envs0)
   end.
 
 
@@ -137,75 +141,77 @@ interpreter(EnvId, NextEnvId0, Envs0) ->
 %% Evaluation functions
 
 -spec eval_string(string(), env_id(), env_id(), envs()) ->
-                     {any(), env_id(), envs()}.
+                     {any(), env_id(), envs(), boolean()}.
 %% @private
 %% Evaluate Schem expression string in the environment denoted by the
 %% environment id.
 %% @end
 eval_string(S, EnvId, NextId, Envs) ->
-  eval(parse_string(S), EnvId, NextId, Envs).
+  eval(parse_string(S), EnvId, NextId, Envs, false).
 
--spec eval(ast(), env_id(), env_id(), envs()) ->
-              {any(), env_id(), envs()}.
-eval({symbol, _} = X, EnvId, NextId, Envs) ->
-  {env_get(X, EnvId, Envs), NextId, Envs};
-eval(X, _EnvId, NextId, Envs) when not is_list(X) ->
-  {X, NextId, Envs};
-eval([{symbol, "define"}, {symbol, X}, Xs], EnvId, NextId0, Envs0) ->
-  {Exp, NextId, Envs1} = eval(Xs, EnvId, NextId0, Envs0),
+-spec eval(ast(), env_id(), env_id(), envs(), boolean()) ->
+              {any(), env_id(), envs(), boolean()}.
+eval({symbol, _} = X, EnvId, NextId, Envs, Dirty) ->
+  {env_get(X, EnvId, Envs), NextId, Envs, Dirty};
+eval(X, _EnvId, NextId, Envs, Dirty) when not is_list(X) ->
+  {X, NextId, Envs, Dirty};
+eval([{symbol, "define"}, {symbol, X}, Xs], EnvId, NextId0, Envs0, Dirty0) ->
+  {Exp, NextId, Envs1, _} = eval(Xs, EnvId, NextId0, Envs0, Dirty0),
   #env{inner = Inner0} = Env0 = maps:get(EnvId, Envs1),
   Inner = maps:put(X, Exp, Inner0),
   Env = Env0#env{inner = Inner},
   Envs = maps:put(EnvId, Env, Envs1),
-  {{symbol, X}, NextId, Envs};
-eval([{symbol, "begin"} | Xs], EnvId, NextId0, Envs0) ->
-  lists:foldl(fun(X, {_, NextId, Envs}) -> eval(X, EnvId, NextId, Envs) end,
-              {[], NextId0, Envs0},
-              Xs);
-eval([{symbol, "set!"}, X, Exp], EnvId, NextId0, Envs0) ->
-  {Val, NextId, Envs} = eval(Exp, EnvId, NextId0, Envs0),
-  {Val, NextId, env_update(X, Val, EnvId, Envs)};
-eval([{symbol, "quote"}, Xs], _EnvId, NextId, Envs) ->
-  {Xs, NextId, Envs};
-eval([{symbol, "lambda"}, Params, Body], EnvId, NextId, Envs) ->
+  {{symbol, X}, NextId, Envs, true};
+eval([{symbol, "begin"} | Xs], EnvId, NextId0, Envs0, Dirty0) ->
+  lists:foldl(
+    fun(X, {_, NextId, Envs, Dirty}) -> eval(X, EnvId, NextId, Envs, Dirty) end,
+    {[], NextId0, Envs0, Dirty0},
+    Xs);
+eval([{symbol, "set!"}, X, Exp], EnvId, NextId0, Envs0, Dirty) ->
+  {Val, NextId, Envs, _Dirty} = eval(Exp, EnvId, NextId0, Envs0, Dirty),
+  {Val, NextId, env_update(X, Val, EnvId, Envs), true};
+eval([{symbol, "quote"}, Xs], _EnvId, NextId, Envs, Dirty) ->
+  {Xs, NextId, Envs, Dirty};
+eval([{symbol, "lambda"}, Params, Body], EnvId, NextId, Envs, Dirty) ->
   Lambda = { procedure
            , lists:map(fun({symbol, P}) -> P end, Params)
            , Body
            , EnvId
            },
-  {Lambda, NextId, Envs};
-eval([{symbol, "if"}, Test, Then, Else], EnvId, NextId0, Envs0) ->
-  {Expression, NextId, Envs} =
-    case eval(Test, EnvId, NextId0, Envs0) of
-      {T, NewNext, NewEnvs} when ?IS_FALSE(T) ->
-        {Else, NewNext, NewEnvs};
-      {_, NewNext, NewEnvs}                   ->
-        {Then, NewNext, NewEnvs}
+  {Lambda, NextId, Envs, Dirty};
+eval([{symbol, "if"}, Test, Then, Else], EnvId, NextId0, Envs0, Dirty0) ->
+  {Expression, NextId, Envs, Dirty} =
+    case eval(Test, EnvId, NextId0, Envs0, Dirty0) of
+      {T, NewNext, NewEnvs, NewDirty} when ?IS_FALSE(T) ->
+        {Else, NewNext, NewEnvs, NewDirty};
+      {_, NewNext, NewEnvs, NewDirty}                   ->
+        {Then, NewNext, NewEnvs, NewDirty}
     end,
-  eval(Expression, EnvId, NextId, Envs);
-eval([X0 | Xs], EnvId, NextId0, Envs0) ->
-  {Proc, NextId1, Envs1} = eval(X0, EnvId, NextId0, Envs0),
-  {Args0, NextId, Envs} = lists:foldl(
-                            fun(X, {ArgsAcc, NextIdAcc0, EnvsAcc0}) ->
-                                {XVal, NextIdAcc, EnvsAcc} =
-                                  eval(X, EnvId, NextIdAcc0, EnvsAcc0),
-                                {[XVal | ArgsAcc], NextIdAcc, EnvsAcc}
-                            end,
-                            {[], NextId1, Envs1},
-                            Xs),
+  eval(Expression, EnvId, NextId, Envs, Dirty);
+eval([X0 | Xs], EnvId, NextId0, Envs0, Dirty0) ->
+  {Proc, NextId1, Envs1, Dirty1} = eval(X0, EnvId, NextId0, Envs0, Dirty0),
+  {Args0, NextId, Envs, Dirty} =
+    lists:foldl(
+      fun(X, {ArgsAcc, NextIdAcc0, EnvsAcc0, DirtyAcc0}) ->
+          {XVal, NextIdAcc, EnvsAcc, DirtyAcc} =
+            eval(X, EnvId, NextIdAcc0, EnvsAcc0, DirtyAcc0),
+          {[XVal | ArgsAcc], NextIdAcc, EnvsAcc, DirtyAcc}
+      end,
+      {[], NextId1, Envs1, Dirty1},
+      Xs),
   Args = lists:reverse(Args0),
-  call_procedure(Proc, Args, NextId, Envs).
+  call_procedure(Proc, Args, NextId, Envs, Dirty).
 
 %% Primitive procedures
-call_procedure(F, Args, NextId, Envs) when is_function(F) ->
-  F(Args, NextId, Envs);
+call_procedure(F, Args, NextId, Envs, Dirty) when is_function(F) ->
+  F(Args, NextId, Envs, Dirty);
 %% Schem procedures
-call_procedure({procedure, Params, Body, EnvId}, Args, NextId0, Envs0) ->
+call_procedure({procedure, Params, Body, EnvId}, Args, NextId0, Envs0, _) ->
   NextId = NextId0 + 1,
   Inner = maps:from_list(lists:zip(Params, Args)),
   Env = #env{id = NextId0, inner = Inner, outer = EnvId},
   Envs = maps:put(NextId0, Env, Envs0),
-  eval(Body, NextId0, NextId, Envs).
+  eval(Body, NextId0, NextId, Envs, true).
 
 to_t(true) -> {number, 1};
 to_t(false) -> {number, 0}.
@@ -322,8 +328,8 @@ default_env() ->
       }.
 
 primitive_procedure(F) ->
-  fun(X, NextId, Envs) ->
-      {F(X), NextId, Envs}
+  fun(X, NextId, Envs, Dirty) ->
+      {F(X), NextId, Envs, Dirty}
   end.
 
 

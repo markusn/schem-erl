@@ -52,10 +52,17 @@
              , outer = undefined :: maybe_env_id()
              }).
 
+-record(s, { id :: env_id()
+           , next_id :: env_id()
+           , envs :: envs()
+           , dirty = false :: boolean()
+           }).
+
 
 %%=============================================================================
 %% Types
 
+-type s() :: #s{}.
 -type env() :: #env{}.
 -type env_id() :: non_neg_integer().
 -type maybe_env_id() :: env_id() | undefined.
@@ -92,7 +99,8 @@ main(_) ->
   io:format("schem intepreter~n", []),
   Env = default_env(),
   Envs = #{Env#env.id => Env},
-  interpreter(Env#env.id, Env#env.id + 1, Envs).
+  S = #s{id = Env#env.id, next_id = Env#env.id + 1, envs = Envs},
+  interpreter(S).
 
 %%=============================================================================
 %% API functions
@@ -101,10 +109,14 @@ main(_) ->
 %% Evaluate the Scheme expressions and return the result.
 %% @end
 -spec eval_string(string()) -> any().
-eval_string(S) ->
+eval_string(Str) ->
   Env = default_env(),
   Envs = #{Env#env.id => Env},
-  {R, _NId, _Envs, _Dirty} = eval_string(S, Env#env.id, Env#env.id + 1, Envs),
+  S = #s{ id = Env#env.id
+        , next_id = Env#env.id + 1
+        , envs = Envs
+        },
+  {R, _S} = eval_string(Str, S),
   R.
 
 
@@ -114,40 +126,44 @@ eval_string(S) ->
 %%-----------------------------------------------------------------------------
 %% Interpreter functions
 
--spec interpreter(env_id(), env_id(), envs()) -> ok.
-interpreter(EnvId, NextId0, Envs0) ->
+-spec interpreter(s()) -> ok.
+interpreter(S0) ->
   try
-    S0 = io:get_line("schem> "),
-    case S0 of
+    Str0 = io:get_line("schem> "),
+    case Str0 of
       eof -> io:format("#<EOF>~n", []);
       _   ->
-        S = string:strip(string:strip(S0, both, 13), both, 10),
-        {Res, NextId, Envs1, Dirty} = eval_string(S, EnvId, NextId0, Envs0),
+        Str = string:strip(string:strip(Str0, both, 13), both, 10),
+        {Res, S1} = eval_string(Str, S0),
         io:format("~s~n", [pp(Res)]),
         %% Only GC if something dirty happened
-        Envs = case Dirty of
-                 true  -> gc(EnvId, Envs1);
-                 false -> Envs1
+        Envs = case S1#s.dirty of
+                 true  -> gc(S1#s.id, S1#s.envs);
+                 false -> S1#s.envs
                end,
-        interpreter(EnvId, NextId, Envs)
+        S = S1#s{ envs = Envs },
+        interpreter(S)
     end
   catch error:Error ->
       io:format("Error: ~p~n~n", [Error]),
-      interpreter(EnvId, NextId0, Envs0)
+      interpreter(S0)
   end.
 
 
 %%-----------------------------------------------------------------------------
 %% Evaluation functions
 
--spec eval_string(string(), env_id(), env_id(), envs()) ->
-                     {any(), env_id(), envs(), boolean()}.
+-spec eval_string(string(), s()) -> {any(), s()}.
 %% @private
 %% Evaluate Schem expression string in the environment denoted by the
 %% environment id.
 %% @end
-eval_string(S, EnvId, NextId, Envs) ->
-  eval(parse_string(S), EnvId, NextId, Envs, false).
+eval_string(Str, S0) ->
+  #s{id = EnvId0, next_id = NextId0, envs = Envs0, dirty = Dirty0} = S0,
+  Ast = parse_string(Str),
+  {Res, NextId, Envs, Dirty} = eval(Ast, EnvId0, NextId0, Envs0, Dirty0),
+  S = S0#s{next_id = NextId, envs = Envs, dirty = Dirty},
+  {Res, S}.
 
 -spec eval(ast(), env_id(), env_id(), envs(), boolean()) ->
               {any(), env_id(), envs(), boolean()}.
